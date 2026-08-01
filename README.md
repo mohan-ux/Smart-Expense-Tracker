@@ -75,6 +75,25 @@ tests/
   test_expenses.py   # pytest suite: CRUD, filtering, totals, edge cases
 ```
 
+## Architecture
+
+This follows a standard router / schema / repository split:
+
+- **`main.py` (router)** — HTTP layer only: parses requests, calls the store,
+  shapes responses. No business logic lives here.
+- **`models.py` (schema)** — Pydantic request/response contracts and field
+  validation (blank checks, decimal precision, positivity).
+- **`storage.py` (repository)** — the only place that knows *how* expenses
+  are stored (in-memory dict + lock). Swapping this for a database later
+  would mean changing this one file, not the routes.
+
+There's deliberately **no separate service layer**. The "business logic" here
+is a filter and a sum — introducing a `services/` layer to wrap two
+one-line operations would be structure for its own sake, not for the
+codebase's actual complexity. Standard FastAPI production guidance agrees
+services/repositories should be introduced when a project's logic actually
+needs them, not pre-emptively for an app this size.
+
 ## Design notes
 
 - Storage is a plain in-memory dict, reset on every server restart — matches
