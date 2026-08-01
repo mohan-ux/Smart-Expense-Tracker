@@ -37,6 +37,46 @@ implements them was largely AI-drafted and then verified by me.
   (e.g. `ge=0` instead of `gt=0`) and I wanted a failing test to catch that,
   not just eyeball the code.
 
+## 2b. A follow-up hardening pass (after a self-review)
+
+After the first working version, I asked Claude Code to review its own
+output specifically for structure, functionality, exception handling, and
+security, then acted on what came back rather than accepting the review
+uncritically:
+
+- **Confirmed and fixed a real concurrency bug**: `ExpenseStore._next_id += 1`
+  was not atomic, and FastAPI runs sync route handlers in a thread pool, so
+  concurrent `POST /expenses` calls could race and silently overwrite one
+  expense with another under a duplicate id. I added a `threading.Lock`
+  around all store mutations/reads, and — importantly — didn't just trust
+  that the fix worked. I added `test_concurrent_adds_never_collide_on_id`,
+  which fires 50 adds across 20 threads and asserts every returned id is
+  unique, so the fix is verified by a failing-then-passing test, not just
+  code inspection.
+- **Accepted the `float` → `Decimal` suggestion** for `amount` and totals,
+  since summing floats can accumulate binary rounding error. I verified this
+  concretely: I wrote a test with `"10.10"` and `"20.20"` (a pair known to
+  misbehave under float addition) and confirmed the API now returns exactly
+  `"30.30"`.
+- **Noticed and accepted a side effect I hadn't asked for**: switching to
+  `Decimal` changed the wire format — `amount`/totals now serialize as JSON
+  strings (`"4.50"`) instead of numbers (`4.5`), because Pydantic v2
+  serializes `Decimal` as a string by default to avoid reintroducing float
+  imprecision on the client side. I re-ran the full suite, saw exactly which
+  assertions broke because of this, and updated them deliberately rather than
+  loosening them to make failures go away — the string format is the correct
+  production choice for money, not a bug to paper over.
+- **Added a global exception handler** (`main.py`) that logs unhandled
+  errors server-side and returns a generic `500` to the client, so a future
+  bug can't leak a stack trace. I verified it doesn't shadow FastAPI's
+  existing 404/422 handling by re-running the delete-404 and validation-422
+  tests afterward — they still pass, confirming Starlette dispatches to the
+  more specific handler first.
+- **Tightened blank-input validation**: `title`/`category` of `"   "` used to
+  pass the old `min_length=1` check. Added a validator that strips whitespace
+  and rejects blank results, with tests for both the rejection and the
+  stripping behavior (e.g. `"  Coffee  "` → `"Coffee"`).
+
 ## 3. AI suggestions I decided not to use, and why
 
 - **A database (SQLite/Postgres) was not something I asked for or added**,
@@ -59,3 +99,9 @@ implements them was largely AI-drafted and then verified by me.
   bonus work at one feature, so I implemented only Swagger/OpenAPI docs, which
   FastAPI generates automatically from the existing route and Pydantic
   definitions at no extra implementation cost.
+- **A `/health` endpoint and structured request logging middleware** were
+  considered during the hardening pass, since they're common in real
+  production services. I left them out — they're operational scaffolding for
+  a deployed service, not a fix for a failure mode in the existing 5
+  endpoints, and adding them would be scope creep beyond "make it not break,"
+  which was the actual ask.

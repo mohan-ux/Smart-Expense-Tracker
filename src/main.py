@@ -1,7 +1,12 @@
-from fastapi import FastAPI, HTTPException, status
+import logging
+
+from fastapi import FastAPI, HTTPException, Request, status
+from fastapi.responses import JSONResponse
 
 from src.models import CategoryTotal, Expense, ExpenseCreate, TotalsResponse
 from src.storage import ExpenseStore
+
+logger = logging.getLogger("expense_tracker")
 
 app = FastAPI(
     title="Smart Expense Tracker API",
@@ -10,6 +15,12 @@ app = FastAPI(
 )
 
 store = ExpenseStore()
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    logger.exception("Unhandled error on %s %s", request.method, request.url.path)
+    return JSONResponse(status_code=500, content={"detail": "Internal server error"})
 
 
 @app.post("/expenses", response_model=Expense, status_code=status.HTTP_201_CREATED, tags=["expenses"])

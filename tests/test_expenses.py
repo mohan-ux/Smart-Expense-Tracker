@@ -1,3 +1,5 @@
+from concurrent.futures import ThreadPoolExecutor
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -34,7 +36,7 @@ def test_add_expense_returns_created_expense_with_id(client):
     body = response.json()
     assert body["id"] == 1
     assert body["title"] == "Coffee"
-    assert body["amount"] == 4.5
+    assert body["amount"] == "4.5"  # Decimal is serialized as a string to preserve precision
     assert body["category"] == "Food"
     assert body["date"] == "2026-07-01"
 
@@ -107,9 +109,9 @@ def test_totals_overall_and_by_category(client):
 
     assert response.status_code == 200
     body = response.json()
-    assert body["overall_total"] == 35
+    assert body["overall_total"] == "35"
     by_category = {c["category"]: c["total"] for c in body["by_category"]}
-    assert by_category == {"Food": 15, "Transport": 20}
+    assert by_category == {"Food": "15", "Transport": "20"}
 
 
 def test_totals_with_no_expenses_is_zero(client):
@@ -117,7 +119,7 @@ def test_totals_with_no_expenses_is_zero(client):
 
     assert response.status_code == 200
     body = response.json()
-    assert body["overall_total"] == 0
+    assert body["overall_total"] == "0"
     assert body["by_category"] == []
 
 
@@ -134,3 +136,71 @@ def test_delete_nonexistent_expense_returns_404(client):
     response = client.delete("/expenses/999")
 
     assert response.status_code == 404
+
+
+def test_delete_with_non_integer_id_returns_422(client):
+    response = client.delete("/expenses/not-a-number")
+
+    assert response.status_code == 422
+
+
+def test_total_reflects_deletion(client):
+    first = client.post("/expenses", json=make_expense(amount=10, category="Food")).json()
+    client.post("/expenses", json=make_expense(amount=5, category="Food"))
+
+    client.delete(f"/expenses/{first['id']}")
+    response = client.get("/expenses/total")
+
+    body = response.json()
+    assert body["overall_total"] == "5"
+    assert body["by_category"] == [{"category": "Food", "total": "5"}]
+
+
+def test_add_expense_rejects_whitespace_only_title(client):
+    response = client.post("/expenses", json=make_expense(title="   "))
+
+    assert response.status_code == 422
+
+
+def test_add_expense_rejects_whitespace_only_category(client):
+    response = client.post("/expenses", json=make_expense(category="   "))
+
+    assert response.status_code == 422
+
+
+def test_add_expense_strips_surrounding_whitespace(client):
+    response = client.post("/expenses", json=make_expense(title="  Coffee  ", category="  Food  "))
+
+    body = response.json()
+    assert body["title"] == "Coffee"
+    assert body["category"] == "Food"
+
+
+def test_totals_do_not_accumulate_floating_point_error(client):
+    # 10.10 + 20.20 == 30.30 exactly only if summed as Decimal, not float
+    # (float summation of these two values yields 30.299999999999997).
+    client.post("/expenses", json=make_expense(amount="10.10", category="Food"))
+    client.post("/expenses", json=make_expense(amount="20.20", category="Food"))
+
+    response = client.get("/expenses/total")
+
+    assert response.json()["overall_total"] == "30.30"
+
+
+def test_amount_with_too_many_decimal_places_is_rejected(client):
+    response = client.post("/expenses", json=make_expense(amount="4.999"))
+
+    assert response.status_code == 422
+
+
+def test_concurrent_adds_never_collide_on_id(client):
+    def add_one(i: int):
+        return client.post("/expenses", json=make_expense(title=f"item-{i}"))
+
+    with ThreadPoolExecutor(max_workers=20) as pool:
+        responses = list(pool.map(add_one, range(50)))
+
+    assert all(r.status_code == 201 for r in responses)
+    ids = [r.json()["id"] for r in responses]
+    assert len(ids) == len(set(ids))
+    assert len(client.get("/expenses").json()) == 50
